@@ -174,8 +174,8 @@ function renderEnvCustomizer() {
         </div>
 
         <div style="display:grid; grid-template-columns: 1fr 1fr; gap:clamp(18px, 3.33vw, 40px); margin-top:14px;">
-          <div id="envForm"></div>
-          <div id="envPreview"></div>
+          <div id="envForm" style="min-width:0;"></div>
+          <div id="envPreview" style="min-width:0;"></div>
         </div>
       </div>
     `;
@@ -355,11 +355,6 @@ function renderForm(model) {
       // ✅ 커서 튐 없이 실시간 미리보기만 갱신하고 싶으면:
       renderPreview(deriveModel());
     };
-    // 멈춘 뒤(혹은 포커스 아웃) 최종 반영 느낌이 필요하면:
-    inpBaseCustom.onblur = () => {
-      // preview만 갱신이면 이것도 renderPreview(deriveModel())로 바꿔도 됨
-      renderEnvCustomizer();
-    };
   }
 
   // Dev toggle: 문구+base가 바뀌므로 전체 재렌더(단, preview만 갱신해도 되면 renderPreviewOnly로)
@@ -387,16 +382,12 @@ function renderForm(model) {
         return;
       }
 
-      const baseImage = baseImageOverride.trim()
-        ? baseImageOverride.trim()
-        : findBaseImage(selectedCuda, selectedTorch);
-
       const payload = {
         mode: "dockerOnly",
         cuda: selectedCuda,
         torch: selectedTorch,
         isDev,
-        baseImage,
+        baseImage: m.effectiveBase,
         imageTag: document.getElementById("inpTag").value.trim() || "cubicle/custom:latest",
         makeCompose: document.getElementById("chkCompose").checked,
         extraPip: document.getElementById("txtPip").value || ""
