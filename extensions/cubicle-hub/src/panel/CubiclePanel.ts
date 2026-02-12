@@ -50,6 +50,16 @@ export class CubiclePanel {
         case "image.generateFiles.placeholder":
           vscode.window.showInformationMessage("Generate files (placeholder). Next: implement file writing.");
           break;
+
+        case "preset.load":
+          await this.handlePresetLoad();
+          break;
+
+        case "image.generateFiles":
+          // 아직 파일 생성 안 붙일 거면 일단 로그만
+          vscode.window.showInformationMessage("Generate requested (payload received).");
+          // TODO: 다음 단계에서 this.handleGenerateFiles(msg.payload)로 파일 생성 구현
+          break;
       }
     });
 
@@ -67,20 +77,59 @@ export class CubiclePanel {
       vscode.Uri.joinPath(this.context.extensionUri, "resources", "webview", "app.js")
     );
 
-    const csp = `default-src 'none'; script-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline';`;
+    const nonce = this.getNonce();
+    const csp = [
+      `default-src 'none'`,
+      `img-src ${webview.cspSource} https:`,
+      `style-src ${webview.cspSource} 'unsafe-inline'`,
+      `script-src 'nonce-${nonce}' ${webview.cspSource}`,
+    ].join("; ");
 
     return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta http-equiv="Content-Security-Policy" content="${csp}">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Cubicle Hub</title>
-</head>
-<body>
-  <div id="root"></div>
-  <script src="${scriptUri}"></script>
-</body>
-</html>`;
+  <html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="${csp}">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cubicle Hub</title>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script nonce="${nonce}">
+      const el = document.getElementById("root");
+      el.innerHTML =
+        "<div style='padding:12px;font-family:sans-serif'>" +
+        "<div><b>INLINE OK</b></div>" +
+        "<div id='inlineTime'></div>" +
+        "</div>";
+      document.getElementById("inlineTime").textContent =
+        "inline at: " + new Date().toISOString();
+    </script>
+
+    <script nonce="${nonce}" src="${scriptUri}"></script>
+  </body>
+  </html>`;
   }
+
+  private async handlePresetLoad() {
+    const presetUri = vscode.Uri.joinPath(
+      this.context.extensionUri,
+      "resources",
+      "presets",
+      "pytorch_cuda_matrix.json"
+    );
+    const bytes = await vscode.workspace.fs.readFile(presetUri);
+    const text = Buffer.from(bytes).toString("utf-8");
+    this.panel.webview.postMessage({ type: "preset.data", text });
+  }
+
+  private getNonce() {
+    let text = "";
+    const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    for (let i = 0; i < 32; i++) {
+      text += possible.charAt(Math.floor(Math.random() * possible.length));
+    }
+    return text;
+  }  
 }
