@@ -8,6 +8,7 @@ let selectedCuda = "";
 let selectedTorch = "";
 let baseImageOverride = "";
 let selectionMode = "cuda-first"; // or 'torch-first'
+let envCustomizerMounted = false;
 
 // ---- helpers ----
 function uniq(arr) {
@@ -66,6 +67,61 @@ function escapeHtml(s) {
   return (s ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+function deriveModel() {
+  const allCudas = uniq(presets.map(p => p.cuda)).sort(compareSemverDesc);
+  const allTorches = uniq(presets.map(p => p.torch)).sort(compareSemverDesc);
+
+  // 호환 리스트
+  const torchesForCuda = selectedCuda ? getTorchesForCuda(selectedCuda) : [];
+  const cudasForTorch  = selectedTorch ? getCudasForTorch(selectedTorch) : [];
+
+  // custom-base가 아닐 때만 조합 일관성 보정
+  if (selectionMode !== "custom-base" && selectedCuda && selectedTorch) {
+    const ok = presets.some(p => p.cuda === selectedCuda && p.torch === selectedTorch);
+    if (!ok) {
+      if (selectionMode === "cuda-first") selectedTorch = "";
+      else if (selectionMode === "torch-first") selectedCuda = "";
+    }
+  }
+
+  // 실제 베이스 이미지
+  const effectiveBase =
+    selectionMode === "custom-base"
+      ? baseImageOverride.trim()
+      : (selectedCuda && selectedTorch ? findBaseImage(selectedCuda, selectedTorch) : "");
+
+  // Dockerfile 미리보기(일단 최소)
+  const dockerfileText = buildDockerfilePreview({
+    baseImage: effectiveBase,
+    selectionMode,
+    selectedCuda,
+    selectedTorch,
+    isDev
+  });
+
+  // Generate 가능 여부
+  const canGenerate =
+    selectionMode === "custom-base"
+      ? !!effectiveBase
+      : !!(selectedCuda && selectedTorch);
+
+  return {
+    allCudas,
+    allTorches,
+    torchesForCuda,
+    cudasForTorch,
+    effectiveBase,
+    dockerfileText,
+    canGenerate,
+    isCustom: selectionMode === "custom-base"
+  };
+}
+
+function buildDockerfilePreview({ baseImage }) {
+  if (!baseImage) return `# Select versions or enter a base image\n`;
+  return `FROM ${baseImage}\n\n# TODO: add steps here\n`;
+}
+
 // ---- screens ----
 function renderWelcome() {
   root.innerHTML = `
@@ -105,225 +161,237 @@ function renderEnvCustomizer() {
         <p>Loading presets...</p>
       </div>
     `;
+    envCustomizerMounted = false;
     return;
   }
 
-  const allCudas = uniq(presets.map(p => p.cuda)).sort(compareSemverDesc);
-  const allTorches = uniq(presets.map(p => p.torch)).sort(compareSemverDesc);
+  if (!envCustomizerMounted) {
+    root.innerHTML = `
+      <div style="padding:16px; font-family:sans-serif; line-height:1.35; max-width:1200px;">
+        <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;">
+          <h2 style="margin:0;">Environment Customizer</h2>
+          <div style="opacity:0.7;">Docker-only mode · templates only</div>
+        </div>
 
-  const torchesForCuda = selectedCuda ? getTorchesForCuda(selectedCuda) : [];
-  const cudasForTorch = selectedTorch ? getCudasForTorch(selectedTorch) : [];
-
-  // Make selections consistent
-  // If cuda selected but torch invalid -> reset torch
-  if (selectionMode !== "custom-base" && selectedCuda && selectedTorch) {
-    const ok = presets.some(p => p.cuda === selectedCuda && p.torch === selectedTorch);
-    if (!ok) {
-        if (selectionMode === "cuda-first") selectedTorch = "";
-        else selectedCuda = ""; // "cuda 먼저 선택" 흐름이면 torch만 다시 고르게
-    }
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:clamp(18px, 3.33vw, 40px); margin-top:14px;">
+          <div id="envForm"></div>
+          <div id="envPreview"></div>
+        </div>
+      </div>
+    `;
+    envCustomizerMounted = true;
   }
 
-  // base image는 둘 다 선택된 후에만 제안
-  const effectiveBase =
-    selectionMode === "custom-base"
-      ? baseImageOverride.trim()
-      : (selectedCuda && selectedTorch ? findBaseImage(selectedCuda, selectedTorch) : "");
+  renderAll();
+}
 
-  // ---- UI ----
-  root.innerHTML = `
-    <div style="padding:16px; font-family:sans-serif; line-height:1.35; max-width:980px;">
-      <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;">
-        <h2 style="margin:0;">Environment Customizer</h2>
-        <div style="opacity:0.7;">Docker-only mode · templates only</div>
-      </div>
+function renderAll() {
+  const model = deriveModel();
+  renderForm(model);
+  renderPreview(model);
+}
 
-      <p style="margin-top:8px; opacity:0.8;">
+function renderForm(model) {
+  const form = document.getElementById("envForm");
+  if (!form) return;
+
+  form.innerHTML = `
+    <div style="padding:0; font-family:sans-serif; line-height:1.35;">
+      <p style="margin-top:0; opacity:0.8;">
         Choose selection order, then pick versions sequentially.
       </p>
 
-      <!-- 베이스 이미지 선택 라디오 버튼 -->
-      <div style="margin-top:8px; display:flex; gap:12px; align-items:center;">
-        <label style="margin-right:8px;"><input type="radio" name="order" value="cuda-first" ${selectionMode === 'cuda-first' ? 'checked' : ''}/> CUDA first</label>
-        <label style="margin-right:8px;"><input type="radio" name="order" value="torch-first" ${selectionMode === 'torch-first' ? 'checked' : ''}/> PyTorch first</label>
+      <!-- selection mode radios -->
+      <div style="margin-top:8px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+        <label><input type="radio" name="order" value="cuda-first" ${selectionMode === 'cuda-first' ? 'checked' : ''}/> CUDA first</label>
+        <label><input type="radio" name="order" value="torch-first" ${selectionMode === 'torch-first' ? 'checked' : ''}/> PyTorch first</label>
         <label><input type="radio" name="order" value="custom-base" ${selectionMode === 'custom-base' ? 'checked' : ''}/> Custom base image</label>
       </div>
 
-      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:14px;">
+      <!-- selectors -->
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:clamp(18px, 3.33vw, 40px); margin-top:14px;">
+        ${
+          selectionMode === "cuda-first" ? `
+            <div>
+              <label><b>CUDA Version</b></label><br/>
+              <select id="selCudaFirst" style="width:100%; padding:6px; box-sizing:border-box;">
+                <option value="" ${selectedCuda === "" ? "selected" : ""} disabled>Choose CUDA...</option>
+                ${model.allCudas.map(v =>
+                  `<option value="${escapeHtml(v)}" ${v === selectedCuda ? "selected" : ""}>${escapeHtml(v)}</option>`
+                ).join("")}
+              </select>
+            </div>
 
-        <!-- selectionMode에 따라서, 드롭다운 또는 텍스트 입력란 표시 -->
-        ${selectionMode === 'cuda-first' ? `
-        <div>
-          <label><b>CUDA Version</b></label><br/>
-          <select id="selCudaFirst" style="width:100%; padding:6px;">
-            <option value="" ${selectedCuda === "" ? "selected" : ""} disabled>Choose CUDA...</option>
-            ${(allCudas).map(v =>
-              `<option value="${escapeHtml(v)}" ${v === selectedCuda ? "selected" : ""}>${escapeHtml(v)}</option>`
-            ).join("")}
-          </select>
-        </div>
+            <div id="torchBox" style="${selectedCuda ? "" : "display:none;"}">
+              <label><b>PyTorch Version</b></label><br/>
+              <select id="selTorchFromCuda" style="width:100%; padding:6px; box-sizing:border-box;">
+                <option value="" ${selectedTorch === "" ? "selected" : ""} disabled>Choose PyTorch...</option>
+                ${model.torchesForCuda.map(v =>
+                  `<option value="${escapeHtml(v)}" ${v === selectedTorch ? "selected" : ""}>${escapeHtml(v)}</option>`
+                ).join("")}
+              </select>
+            </div>
+          ` : selectionMode === "torch-first" ? `
+            <div>
+              <label><b>PyTorch Version</b></label><br/>
+              <select id="selTorchFirst" style="width:100%; padding:6px; box-sizing:border-box;">
+                <option value="" ${selectedTorch === "" ? "selected" : ""} disabled>Choose PyTorch...</option>
+                ${model.allTorches.map(v =>
+                  `<option value="${escapeHtml(v)}" ${v === selectedTorch ? "selected" : ""}>${escapeHtml(v)}</option>`
+                ).join("")}
+              </select>
+            </div>
 
-        <div id="torchBox" style="${selectedCuda ? '' : 'display:none;'}">
-          <label><b>PyTorch Version</b></label><br/>
-          <select id="selTorchFromCuda" style="width:100%; padding:6px;">
-            <option value="" ${selectedTorch === "" ? "selected" : ""} disabled>Choose PyTorch...</option>
-            ${torchesForCuda.map(v =>
-              `<option value="${escapeHtml(v)}" ${v === selectedTorch ? "selected" : ""}>${escapeHtml(v)}</option>`
-            ).join("")}
-          </select>
-        </div>
-        ` : selectionMode === 'torch-first' ? `
-        <div>
-          <label><b>PyTorch Version</b></label><br/>
-          <select id="selTorchFirst" style="width:100%; padding:6px;">
-            <option value="" ${selectedTorch === "" ? "selected" : ""} disabled>Choose PyTorch...</option>
-            ${allTorches.map(v => `<option value="${escapeHtml(v)}" ${v === selectedTorch ? "selected" : ""}>${escapeHtml(v)}</option>`).join("")}
-          </select>
-        </div>
-
-        <div id="cudaBox" style="${selectedTorch ? '' : 'display:none;'}">
-          <label><b>CUDA Version</b></label><br/>
-          <select id="selCudaFromTorch" style="width:100%; padding:6px;">
-            <option value="" ${selectedCuda === "" ? "selected" : ""} disabled>Choose CUDA...</option>
-            ${(cudasForTorch).map(v =>
-              `<option value="${escapeHtml(v)}" ${v === selectedCuda ? "selected" : ""}>${escapeHtml(v)}</option>`
-            ).join("")}
-          </select>
-        </div>
-        ` : `
-        <div>
-          <label><b>Base Image</b></label><br/>
-          <input id="inpBaseCustom" style="width:100%; padding:6px;"
-            placeholder="e.g. pytorch/pytorch:2.10.0-cuda13.0-cudnn9"
-            value="${escapeHtml(baseImageOverride)}" />
-          <div style="margin-top:6px; font-size:12px; opacity:0.75;">
-            We will use this image directly as the <code>FROM</code> line.
-          </div>
-        </div>
-        `}
-
+            <div id="cudaBox" style="${selectedTorch ? "" : "display:none;"}">
+              <label><b>CUDA Version</b></label><br/>
+              <select id="selCudaFromTorch" style="width:100%; padding:6px; box-sizing:border-box;">
+                <option value="" ${selectedCuda === "" ? "selected" : ""} disabled>Choose CUDA...</option>
+                ${model.cudasForTorch.map(v =>
+                  `<option value="${escapeHtml(v)}" ${v === selectedCuda ? "selected" : ""}>${escapeHtml(v)}</option>`
+                ).join("")}
+              </select>
+            </div>
+          ` : `
+            <div style="grid-column: 1 / -1;">
+              <label><b>Base Image</b></label><br/>
+              <input id="inpBaseCustom" style="width:100%; padding:6px; box-sizing:border-box;"
+                placeholder="e.g. pytorch/pytorch:2.10.0-cuda13.0-cudnn9"
+                value="${escapeHtml(baseImageOverride)}" />
+              <div style="margin-top:6px; font-size:12px; opacity:0.75;">
+                We will use this image directly as the <code>FROM</code> line.
+              </div>
+            </div>
+          `
+        }
       </div>
 
-      <!-- runtime / devel 선택 체크 박스 -->
-      ${selectionMode !== 'custom-base' ? `
-        <div style="margin-top:14px;">
-          <label style="user-select:none;">
-            <input id="chkDev" type="checkbox" ${isDev ? "checked" : ""}/>
-            For development (devel)
-          </label>
-          <div style="margin-top:6px; font-size:12px; opacity:0.75;">
-            ${isDev ? "Using -devel variant when available." : "Using -runtime variant when available."}
+      <!-- dev/runtime toggle -->
+      ${
+        selectionMode !== "custom-base" ? `
+          <div style="margin-top:14px;">
+            <label style="user-select:none;">
+              <input id="chkDev" type="checkbox" ${isDev ? "checked" : ""}/>
+              For development (devel)
+            </label>
+            <div style="margin-top:6px; font-size:12px; opacity:0.75;">
+              ${isDev ? "Using -devel variant when available." : "Using -runtime variant when available."}
+            </div>
           </div>
-        </div>      
         ` : `
-        <div style="margin-top:14px; font-size:12px; opacity:0.75;">
-          Dev/runtime toggle is disabled in Custom base mode.
-        </div>
-        `}
+          <div style="margin-top:14px; font-size:12px; opacity:0.75;">
+            Dev/runtime toggle is disabled in Custom base mode.
+          </div>
+        `
+      }
 
-      <div style="margin-top:14px; opacity:0.85;">
-        <b>Suggested base image:</b>
-        <div style="margin-top:6px; padding:10px; background: rgba(127,127,127,0.12); border-radius: 8px;">
-          <code>${escapeHtml(effectiveBase || "(select versions or enter base image)")}</code>
-        </div>
+      <!-- actions -->
+      <div style="margin-top:14px; display:flex; gap:8px; align-items:center;">
+        <button id="btnGen" ${model.canGenerate ? "" : "disabled"}>Generate Template Files</button>
       </div>
-
-      <!-- 나머지 폼(override, devel/runtime, compose, pip 등)은 그대로 붙이면 됨 -->
     </div>
   `;
 
-    // ---- wiring (stage-based) ----
+  // -----------------------
+  // wiring
+  // -----------------------
 
-    // CUDA (cuda-first): 초기 CUDA 셀렉터
-    const selCudaFirst = document.getElementById("selCudaFirst");
-    if (selCudaFirst) {
-    selCudaFirst.onchange = (e) => {
-      selectedCuda = e.target.value;
-
-      const candidates = getTorchesForCuda(selectedCuda);
-      selectedTorch = candidates[0] || "";
-
+  // Mode radios: 구조가 바뀌므로 전체 재렌더
+  const orderRadios = form.querySelectorAll('input[name="order"]');
+  orderRadios.forEach(r => {
+    r.onchange = (e) => {
+      selectionMode = e.target.value;
+      selectedCuda = "";
+      selectedTorch = "";
+      // baseImageOverride는 유지(너 의도대로). 원하면 여기서 "" 처리.
       renderEnvCustomizer();
     };
-    }
+  });
 
-    // Torch (CUDA-first 흐름에서 CUDA 선택 후 나타나는 Torch)
-    const selTorchFromCuda = document.getElementById("selTorchFromCuda");
-    if (selTorchFromCuda) {
+  // CUDA-first: CUDA change => torch 최신 자동선택 => 전체 재렌더
+  const selCudaFirst = document.getElementById("selCudaFirst");
+  if (selCudaFirst) {
+    selCudaFirst.onchange = (e) => {
+      selectedCuda = e.target.value;
+      const candidates = getTorchesForCuda(selectedCuda);
+      selectedTorch = candidates[0] || "";
+      renderEnvCustomizer();
+    };
+  }
+
+  // CUDA-first: torch change => 전체 재렌더
+  const selTorchFromCuda = document.getElementById("selTorchFromCuda");
+  if (selTorchFromCuda) {
     selTorchFromCuda.onchange = (e) => {
       selectedTorch = e.target.value;
       renderEnvCustomizer();
     };
-    }
+  }
 
-    // Torch-first (아직 아무것도 선택 안 했을 때만 존재)
-    const selTorchFirst = document.getElementById("selTorchFirst");
-    if (selTorchFirst) {
+  // Torch-first: torch change => cuda 최신 자동선택 => 전체 재렌더
+  const selTorchFirst = document.getElementById("selTorchFirst");
+  if (selTorchFirst) {
     selTorchFirst.onchange = (e) => {
       selectedTorch = e.target.value;
-
       const candidates = getCudasForTorch(selectedTorch);
       selectedCuda = candidates[0] || "";
-
       renderEnvCustomizer();
     };
-    }
+  }
 
-    // CUDA 선택 when torch-first path (selCudaFromTorch)
-    const selCudaFromTorch = document.getElementById("selCudaFromTorch");
-    if (selCudaFromTorch) {
-      selCudaFromTorch.onchange = (e) => {
-        selectedCuda = e.target.value;
-        renderEnvCustomizer();
-      };
-    }
-
-    // Order radio buttons
-    const orderRadios = document.querySelectorAll('input[name="order"]');
-    if (orderRadios && orderRadios.length) {
-      orderRadios.forEach(r => r.onchange = (e) => {
-        selectionMode = e.target.value;
-        // reset selections when switching mode
-        selectedCuda = "";
-        selectedTorch = "";
-        //baseImageOverride = "";
-        renderEnvCustomizer();
-      });
-    }
-
-    const inpBaseCustom = document.getElementById("inpBaseCustom");
-    if (inpBaseCustom) {
-      inpBaseCustom.oninput = (e) => {
-        baseImageOverride = e.target.value;
-        //renderEnvCustomizer(); // 즉시 suggested 반영 원하면
-      };
-      inpBaseCustom.onblur = () => renderEnvCustomizer();
-    }
-    
-    // dev/runtime toggle (항상 존재로 렌더했다면)
-    const chkDev = document.getElementById("chkDev");
-    if (chkDev) {
-    chkDev.onchange = (e) => {
-        isDev = e.target.checked;
-        renderEnvCustomizer(); // suggested base image 갱신
+  // Torch-first: cuda change => 전체 재렌더
+  const selCudaFromTorch = document.getElementById("selCudaFromTorch");
+  if (selCudaFromTorch) {
+    selCudaFromTorch.onchange = (e) => {
+      selectedCuda = e.target.value;
+      renderEnvCustomizer();
     };
-    }
+  }
 
-    // Generate: 둘 다 선택된 경우에만 유효하게
-    const btnGen = document.getElementById("btnGen");
-    if (btnGen) {
+  // Custom base: typing => 상태만 업데이트 (+ preview만 업데이트하고 싶으면 아래 주석 해제)
+  const inpBaseCustom = document.getElementById("inpBaseCustom");
+  if (inpBaseCustom) {
+    inpBaseCustom.oninput = (e) => {
+      baseImageOverride = e.target.value;
+      // ✅ 커서 튐 없이 실시간 미리보기만 갱신하고 싶으면:
+      renderPreview(deriveModel());
+    };
+    // 멈춘 뒤(혹은 포커스 아웃) 최종 반영 느낌이 필요하면:
+    inpBaseCustom.onblur = () => {
+      // preview만 갱신이면 이것도 renderPreview(deriveModel())로 바꿔도 됨
+      renderEnvCustomizer();
+    };
+  }
+
+  // Dev toggle: 문구+base가 바뀌므로 전체 재렌더(단, preview만 갱신해도 되면 renderPreviewOnly로)
+  const chkDev = document.getElementById("chkDev");
+  if (chkDev) {
+    chkDev.onchange = (e) => {
+      isDev = e.target.checked;
+      renderEnvCustomizer();
+    };
+  }
+
+  // Generate (custom-base 포함)
+  const btnGen = document.getElementById("btnGen");
+  if (btnGen) {
     btnGen.onclick = () => {
-        // 둘 중 하나라도 없으면 안내(또는 버튼 disabled를 렌더에서 처리)
-        if (!selectedCuda || !selectedTorch) {
-        vscode.postMessage({ type: "toast", message: "Select CUDA and PyTorch first." });
-        return;
-        }
+      const m = deriveModel();
 
-        const baseImage = baseImageOverride.trim()
+      if (!m.canGenerate) {
+        vscode.postMessage({
+          type: "toast",
+          message: selectionMode === "custom-base"
+            ? "Enter a base image."
+            : "Select CUDA and PyTorch first."
+        });
+        return;
+      }
+
+      const baseImage = baseImageOverride.trim()
         ? baseImageOverride.trim()
         : findBaseImage(selectedCuda, selectedTorch);
 
-        const payload = {
+      const payload = {
         mode: "dockerOnly",
         cuda: selectedCuda,
         torch: selectedTorch,
@@ -332,19 +400,27 @@ function renderEnvCustomizer() {
         imageTag: document.getElementById("inpTag").value.trim() || "cubicle/custom:latest",
         makeCompose: document.getElementById("chkCompose").checked,
         extraPip: document.getElementById("txtPip").value || ""
-        };
+      };
 
-        vscode.postMessage({ type: "image.generateFiles", payload });
-    };
-  }
-
-    const btnWelcome = document.getElementById("btnWelcome");
-    if (btnWelcome) {
-    btnWelcome.onclick = () => {
-        vscode.postMessage({ type: "navigate", route: "welcome" });
+      vscode.postMessage({ type: "image.generateFiles", payload });
     };
   }
 }
+
+function renderPreview(model) {
+  const box = document.getElementById("envPreview");
+  if (!box) return;
+
+  box.innerHTML = `
+    <div style="font-family:sans-serif;">
+      <div style="opacity:0.8; margin-bottom:8px;"><b>Dockerfile preview</b></div>
+      <pre style="margin:0; padding:12px; background:rgba(127,127,127,0.12); border-radius:8px; overflow:auto; white-space:pre;">
+${escapeHtml(model.dockerfileText || "")}
+      </pre>
+    </div>
+  `;
+}
+
 
 // ---- router ----
 function navigate(route) {
