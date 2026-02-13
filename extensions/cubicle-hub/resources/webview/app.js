@@ -172,7 +172,7 @@ function updateAptSection() {
     } else {
       hint.style.color = "";
       hint.style.opacity = "0.75";
-      hint.textContent = "Press Enter to add. Duplicate names are ignored.";
+      hint.textContent = "Press Enter to add.";
     }
   }
 
