@@ -468,17 +468,16 @@ function renderForm(model) {
     };
   }
 
-  // Custom base: typing => 상태만 업데이트 (+ preview만 업데이트하고 싶으면 아래 주석 해제)
+  // Custom base: typing => 상태만 업데이트
   const inpBaseCustom = document.getElementById("inpBaseCustom");
   if (inpBaseCustom) {
     inpBaseCustom.oninput = (e) => {
       baseImageOverride = e.target.value;
-      // ✅ 커서 튐 없이 실시간 미리보기만 갱신하고 싶으면:
       renderPreview(deriveModel());
     };
   }
 
-  // Dev toggle: 문구+base가 바뀌므로 전체 재렌더(단, preview만 갱신해도 되면 renderPreviewOnly로)
+  // Dev toggle: 문구+base가 바뀌므로 전체 재렌더
   const chkDev = document.getElementById("chkDev");
   if (chkDev) {
     chkDev.onchange = (e) => {
@@ -501,7 +500,7 @@ function renderForm(model) {
     };
   }
 
-  // Apt remove 버튼 (칩의 X)
+  // Apt remove
   const aptChips = document.getElementById("aptChips");
   if (aptChips) {
     aptChips.onclick = (e) => {
@@ -515,7 +514,7 @@ function renderForm(model) {
       updateAptSection();
       renderPreview(deriveModel());
 
-      // (선택) UX: 입력창으로 포커스 복귀
+      // UX: 입력창으로 포커스 복귀
       document.getElementById("inpApt")?.focus();
     };
   }
