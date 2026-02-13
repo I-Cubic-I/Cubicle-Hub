@@ -14,6 +14,8 @@ let envCustomizerMounted = false;
 const lockedAptPackages = ["git"]; // 고정(삭제 불가)
 let aptPackages = [];              // 사용자가 추가한 패키지들 (git 제외)
 let aptWarn = "";                 // 검증 경고/상태
+let editingApt = null;
+let editAptValue = "";
 
 // ---- helpers ----
 function uniq(arr) {
@@ -69,7 +71,12 @@ function findBaseImage(cuda, torch) {
 }
 
 function escapeHtml(s) {
-  return (s ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  return (s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function deriveModel() {
@@ -134,25 +141,26 @@ function isValidPkgName(s) {
 
 function addAptPackage(raw) {
   const name = normalizePkgName(raw);
-  if (!name) return;
+  if (!name) return false;
 
   if (!isValidPkgName(name)) {
     aptWarn = `Invalid package name: "${raw}"`;
-    return;
+    return false;
   }
 
   if (lockedAptPackages.includes(name)) {
     aptWarn = `"${name}" is already included (locked).`;
-    return;
+    return false;
   }
 
   if (aptPackages.includes(name)) {
     aptWarn = `"${name}" is already in the list.`;
-    return;
+    return false;
   }
 
   aptWarn = "";
   aptPackages.push(name);
+  return true;
 }
 
 function removeAptPackage(name) {
@@ -160,25 +168,72 @@ function removeAptPackage(name) {
   aptWarn = "";
 }
 
-function updateAptSection() {
+function updateAptHintOnly() {
   const hint = document.getElementById("aptHint");
-  const chips = document.getElementById("aptChips");
+  if (!hint) return;
 
-  if (hint) {
-    if (aptWarn) {
-      hint.style.opacity = "1";
-      hint.style.color = "var(--vscode-errorForeground, #ff6b6b)";
-      hint.textContent = aptWarn;
-    } else {
-      hint.style.color = "";
-      hint.style.opacity = "0.75";
-      hint.textContent = "Press Enter to add.";
-    }
+  if (aptWarn) {
+    hint.style.opacity = "1";
+    hint.style.color = "var(--vscode-errorForeground, #ff6b6b)";
+    hint.textContent = aptWarn;
+  } else {
+    hint.style.color = "";
+    hint.style.opacity = "0.75";
+    hint.textContent = "Press Enter to add.";
   }
+}
 
+
+function updateAptSection() {
+  updateAptHintOnly();
+
+  const chips = document.getElementById("aptChips");
   if (chips) {
     chips.innerHTML = renderAptChipsHtml();
   }
+}
+
+function onAptChipsFocusOut(e) {
+  const input = e.target?.closest?.('input[data-apt-edit]');
+  if (!input || !editingApt) return;
+
+  const to = e.relatedTarget;
+  if (to && e.currentTarget?.contains?.(to)) return;
+
+  aptWarn = "";
+  exitAptEdit();
+
+  queueMicrotask(() => {
+    updateAptSection();
+    renderPreview(deriveModel());
+  });
+}
+
+function commitAptEdit(oldName, newRaw) {
+  const newName = normalizePkgName(newRaw);
+
+  if (!newName || !isValidPkgName(newName)) {
+    aptWarn = `Invalid package name: "${newRaw}"`;
+    return false;
+  }
+  if (lockedAptPackages.includes(newName)) {
+    aptWarn = `"${newName}" is locked and already included.`;
+    return false;
+  }
+  // oldName 제외하고 중복 체크
+  if (aptPackages.includes(newName) && newName !== oldName) {
+    aptWarn = `"${newName}" is already in the list.`;
+    return false;
+  }
+
+  aptWarn = "";
+  aptPackages = aptPackages.map(p => (p === oldName ? newName : p));
+  return true;
+}
+
+function exitAptEdit() {
+  editingApt = null;
+  editAptValue = "";
 }
 
 function buildDockerfilePreview({ baseImage }) {
@@ -243,28 +298,97 @@ function renderEnvCustomizer() {
   if (!envCustomizerMounted) {
     root.innerHTML = `
       <style>
-        .apt-chip {
-          display:inline-flex; align-items:center; gap:6px; padding:6px 10px;
-          border-radius:999px; background: var(--vscode-editorWidget-background);
+        .chip {
+          position: relative;
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 6px 10px;
+          border-radius: 999px;
+
+          background: var(--vscode-editorWidget-background);
           border: 1px solid var(--vscode-editorWidget-border);
+          color: var(--vscode-foreground);
+
           user-select: none;
         }
-        .apt-chip.removable {
+
+        .chip.removable { cursor: text; }
+        .chip.locked { opacity: 0.9; cursor: default; }
+
+        .chip:hover { border-color: var(--vscode-focusBorder); }
+        .chip.locked:hover { border-color: var(--vscode-editorWidget-border); }
+
+        .chip-text { white-space: nowrap; }
+
+        .chip-badge {
+          display:inline-flex;
+          align-items:center;
+          color: var(--vscode-descriptionForeground);
+          opacity: 0.85;
+        }
+
+        /* overlay X */
+        .chip-x {
+          position: absolute;
+          top: -6px;
+          right: -6px;
+          width: 18px;
+          height: 18px;
+
+          display: none;
+          align-items: center;
+          justify-content: center;
+
+          border-radius: 999px;
+          border: 1px solid var(--vscode-editorWidget-border);
+          background: var(--vscode-editorWidget-background);
+          color: var(--vscode-descriptionForeground);
+
           cursor: pointer;
+          padding: 0;
+          line-height: 1;
         }
-        .apt-chip.removable:hover {
+
+        .chip.removable:hover .chip-x { display: inline-flex; }
+
+        .chip-x:hover {
           border-color: var(--vscode-errorForeground);
+          color: var(--vscode-errorForeground);
         }
-        .apt-chip.removable:active {
-          opacity: 0.9;
+
+        .chip-x:focus {
+          outline: 1px solid var(--vscode-focusBorder);
+          outline-offset: 2px;
         }
-        .apt-chip.locked {
-          cursor: default;
-          opacity: 0.9;
+
+        /* edit input */
+        .chip-edit {
+          width: 12ch;
+          min-width: 8ch;
+          max-width: 28ch;
+
+          background: transparent;
+          color: inherit;
+
+          border: none;
+          outline: none;
+          padding: 0;
+          margin: 0;
+          font: inherit;
         }
-        .apt-lock {
-          display:inline-flex; align-items:center; 
-          color: var(--vscode-descriptionForeground); opacity: 0.85;
+
+        /* edit mode: chip width is fixed, input fills */
+        .chip.is-editing {
+          overflow: hidden;
+        }
+
+        .chip.is-editing .chip-edit {
+          width: 100%;
+          min-width: 0;
+          max-width: none;
+
+          box-sizing: border-box;
         }
       </style>
 
@@ -492,31 +616,104 @@ function renderForm(model) {
     inpApt.onkeydown = (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        addAptPackage(inpApt.value);
-        inpApt.value = "";
-        updateAptSection();
-        renderPreview(deriveModel());
+        
+        const raw = inpApt.value;
+        const ok = addAptPackage(raw);
+        if (ok) {
+          inpApt.value = "";
+          updateAptSection();
+          renderPreview(deriveModel());
+        } else {
+          updateAptHintOnly();
+          inpApt.focus();
+          inpApt.select();
+        }
       }
     };
   }
 
-  // Apt remove
+  // Apt edit
   const aptChips = document.getElementById("aptChips");
   if (aptChips) {
     aptChips.onclick = (e) => {
-      const chip = e.target?.closest?.("[data-apt-remove]");
+      if (e.target?.closest?.('input[data-apt-edit]')) return;
+
+      // 1) X 클릭이면 삭제`
+      const x = e.target?.closest?.("[data-apt-remove]");
+      if (x) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const name = x.getAttribute("data-apt-remove");
+        if (!name) return;
+
+        removeAptPackage(name);
+        updateAptSection();
+        renderPreview(deriveModel());
+        return;
+      }
+
+      // 2) chip 클릭이면 편집 모드 진입 (locked 제외)
+      const chip = e.target?.closest?.("[data-apt-chip]");
       if (!chip) return;
 
-      const name = chip.getAttribute("data-apt-remove");
+      const name = chip.getAttribute("data-apt-chip");
       if (!name) return;
 
-      removeAptPackage(name);
-      updateAptSection();
-      renderPreview(deriveModel());
+      if (lockedAptPackages.includes(name)) return; // locked는 편집 불가
 
-      // UX: 입력창으로 포커스 복귀
-      document.getElementById("inpApt")?.focus();
+      const rect = chip.getBoundingClientRect();
+      const pxWidth = Math.ceil(rect.width);
+
+      editingApt = { name, isLocked: false, pxWidth: pxWidth + 12 };
+      editAptValue = name;
+
+      updateAptSection(); // chips re-render
+
+      queueMicrotask(() => {
+        // render 후 input 포커스
+        const chipsNow = document.getElementById("aptChips");
+        const input = chipsNow?.querySelector('input[data-apt-edit]');
+        input?.focus();
+        input?.select();
+      });
     };
+
+    aptChips.oninput = (e) => {
+      const input = e.target?.closest?.("input[data-apt-edit]");
+      if (!input || !editingApt) return;
+      editAptValue = input.value;
+    };
+
+    aptChips.onkeydown = (e) => {
+      const input = e.target?.closest?.("input[data-apt-edit]");
+      if (!input || !editingApt) return;
+
+      if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        const ok = commitAptEdit(editingApt.name, input.value);
+        if (ok) {
+          exitAptEdit();
+          updateAptSection();
+          renderPreview(deriveModel());
+          return;
+        }
+        updateAptHintOnly();
+        input.focus();
+        input.select();
+        return;
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        aptWarn = "";
+        exitAptEdit();
+        updateAptSection();
+      }
+    };
+
+    aptChips.removeEventListener("focusout", onAptChipsFocusOut, true);
+    aptChips.addEventListener("focusout", onAptChipsFocusOut, true);
   }
 
   // Generate (custom-base 포함)
@@ -563,19 +760,33 @@ function renderAptChipsHtml() {
   return all.map(name => {
     const locked = lockedAptPackages.includes(name);
 
-    if (locked) {
+    if (editingApt && editingApt.name === name) {
+      const w = editingApt?.pxWidth ? Math.ceil(editingApt.pxWidth) : null;
+      const styleW = w ? `style="width:${w}px"` : "";
+      
       return `
-        <span class="apt-chip locked" title="locked">
-          ${escapeHtml(name)}
-          <span class="apt-lock" title="locked">${LOCK_SVG}</span>
+        <span class="chip ${locked ? "locked" : "removable"} is-editing"
+            ${styleW}
+            data-apt-chip="${escapeHtml(name)}">
+          <input class="chip-edit"
+                 data-apt-edit
+                 value="${escapeHtml(editAptValue)}"
+                 ${locked ? "disabled" : ""} />
+          ${locked ? `<span class="chip-badge" title="locked">${LOCK_SVG}</span>` : ""}
         </span>
       `;
     }
 
     return `
-      <span class="apt-chip removable" data-apt-remove="${name}"
-            title="Click to remove">
-        ${escapeHtml(name)}
+      <span class="chip ${locked ? "locked" : "removable"}"
+            data-apt-chip="${escapeHtml(name)}"
+            title="${locked ? "locked" : "Click to edit"}">
+        <span class="chip-text">${escapeHtml(name)}</span>
+
+        ${locked
+          ? `<span class="chip-badge" title="locked">${LOCK_SVG}</span>`
+          : `<button class="chip-x" data-apt-remove="${escapeHtml(name)}" aria-label="remove">×</button>`
+        }
       </span>
     `;
   }).join("");
