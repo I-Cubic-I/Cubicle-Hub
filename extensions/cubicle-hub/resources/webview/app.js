@@ -10,6 +10,11 @@ let baseImageOverride = "";
 let selectionMode = "cuda-first"; // or 'torch-first'
 let envCustomizerMounted = false;
 
+// ---- system packages (apt) ----
+const lockedAptPackages = ["git"]; // 고정(삭제 불가)
+let aptPackages = [];              // 사용자가 추가한 패키지들 (git 제외)
+let aptWarn = "";                 // 검증 경고/상태
+
 // ---- helpers ----
 function uniq(arr) {
   return [...new Set(arr)];
@@ -117,9 +122,79 @@ function deriveModel() {
   };
 }
 
+function normalizePkgName(s) {
+  return (s || "").trim().toLowerCase();
+}
+
+function isValidPkgName(s) {
+  // apt 패키지명은 대체로 [a-z0-9][a-z0-9+.-]+ 형태가 많음
+  // 너무 엄격하게 막지 말고 최소한만 체크
+  return /^[a-z0-9][a-z0-9+.-]*$/.test(s);
+}
+
+function addAptPackage(raw) {
+  const name = normalizePkgName(raw);
+  if (!name) return;
+
+  if (!isValidPkgName(name)) {
+    aptWarn = `Invalid package name: "${raw}"`;
+    return;
+  }
+
+  if (lockedAptPackages.includes(name)) {
+    aptWarn = `"${name}" is already included (locked).`;
+    return;
+  }
+
+  if (aptPackages.includes(name)) {
+    aptWarn = `"${name}" is already in the list.`;
+    return;
+  }
+
+  aptWarn = "";
+  aptPackages.push(name);
+}
+
+function removeAptPackage(name) {
+  aptPackages = aptPackages.filter(p => p !== name);
+  aptWarn = "";
+}
+
+function updateAptSection() {
+  const hint = document.getElementById("aptHint");
+  const chips = document.getElementById("aptChips");
+
+  if (hint) {
+    if (aptWarn) {
+      hint.style.opacity = "1";
+      hint.style.color = "var(--vscode-errorForeground, #ff6b6b)";
+      hint.textContent = aptWarn;
+    } else {
+      hint.style.color = "";
+      hint.style.opacity = "0.75";
+      hint.textContent = "Press Enter to add. Duplicate names are ignored.";
+    }
+  }
+
+  if (chips) {
+    chips.innerHTML = renderAptChipsHtml();
+  }
+}
+
 function buildDockerfilePreview({ baseImage }) {
   if (!baseImage) return `# Select versions or enter a base image\n`;
-  return `FROM ${baseImage}\n\n# TODO: add steps here\n`;
+
+  const allPkgs = [...lockedAptPackages, ...aptPackages];
+
+  const aptBlock = allPkgs.length
+    ? `\n# System packages\nRUN apt-get update && apt-get install -y --no-install-recommends \\\n` +
+      allPkgs.map(p => `    ${p} \\`).join("\n") +
+      `\n && rm -rf /var/lib/apt/lists/*\n`
+    : "";
+
+  return `FROM ${baseImage}\n` +
+         aptBlock +
+         `\n# TODO: add steps here\n`;
 }
 
 // ---- screens ----
@@ -167,6 +242,32 @@ function renderEnvCustomizer() {
 
   if (!envCustomizerMounted) {
     root.innerHTML = `
+      <style>
+        .apt-chip {
+          display:inline-flex; align-items:center; gap:6px; padding:6px 10px;
+          border-radius:999px; background: var(--vscode-editorWidget-background);
+          border: 1px solid var(--vscode-editorWidget-border);
+          user-select: none;
+        }
+        .apt-chip.removable {
+          cursor: pointer;
+        }
+        .apt-chip.removable:hover {
+          border-color: var(--vscode-errorForeground);
+        }
+        .apt-chip.removable:active {
+          opacity: 0.9;
+        }
+        .apt-chip.locked {
+          cursor: default;
+          opacity: 0.9;
+        }
+        .apt-lock {
+          display:inline-flex; align-items:center; 
+          color: var(--vscode-descriptionForeground); opacity: 0.85;
+        }
+      </style>
+
       <div style="padding:16px; font-family:sans-serif; line-height:1.35; max-width:1200px;">
         <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;">
           <h2 style="margin:0;">Environment Customizer</h2>
@@ -284,12 +385,32 @@ function renderForm(model) {
         `
       }
 
+      <!-- system packages (apt) -->
+      <div style="margin-top:16px;">
+        <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;">
+          <label><b>System packages (apt)</b></label>
+          <div style="font-size:12px; opacity:0.7;">Installed during image build</div>
+        </div>
+
+        <input
+          id="inpApt"
+          style="width:100%; padding:6px; box-sizing:border-box; margin-top:6px;"
+          placeholder="Type a package name and press Enter (e.g. curl, build-essential)"
+          autocomplete="off"
+        />
+
+        <div id="aptHint" style="margin-top:6px; font-size:12px; opacity:0.75;"></div>
+
+        <div id="aptChips" style="margin-top:10px; display:flex; flex-wrap:wrap; gap:8px;"></div>
+      </div>
+
       <!-- actions -->
       <div style="margin-top:14px; display:flex; gap:8px; align-items:center;">
         <button id="btnGen" ${model.canGenerate ? "" : "disabled"}>Generate Template Files</button>
       </div>
     </div>
   `;
+  updateAptSection();
 
   // -----------------------
   // wiring
@@ -366,6 +487,39 @@ function renderForm(model) {
     };
   }
 
+  // Apt input: Enter로 추가
+  const inpApt = document.getElementById("inpApt");
+  if (inpApt) {
+    inpApt.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        addAptPackage(inpApt.value);
+        inpApt.value = "";
+        updateAptSection();
+        renderPreview(deriveModel());
+      }
+    };
+  }
+
+  // Apt remove 버튼 (칩의 X)
+  const aptChips = document.getElementById("aptChips");
+  if (aptChips) {
+    aptChips.onclick = (e) => {
+      const chip = e.target?.closest?.("[data-apt-remove]");
+      if (!chip) return;
+
+      const name = chip.getAttribute("data-apt-remove");
+      if (!name) return;
+
+      removeAptPackage(name);
+      updateAptSection();
+      renderPreview(deriveModel());
+
+      // (선택) UX: 입력창으로 포커스 복귀
+      document.getElementById("inpApt")?.focus();
+    };
+  }
+
   // Generate (custom-base 포함)
   const btnGen = document.getElementById("btnGen");
   if (btnGen) {
@@ -396,6 +550,36 @@ function renderForm(model) {
       vscode.postMessage({ type: "image.generateFiles", payload });
     };
   }
+}
+
+const LOCK_SVG = `
+<svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"
+     style="display:block; fill: currentColor;">
+  <path d="M17 9h-1V7a4 4 0 0 0-8 0v2H7a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2zm-7-2a2 2 0 0 1 4 0v2h-4V7zm7 12H7v-8h10v8z"/>
+</svg>`;
+
+function renderAptChipsHtml() {
+  const all = [...lockedAptPackages, ...aptPackages];
+
+  return all.map(name => {
+    const locked = lockedAptPackages.includes(name);
+
+    if (locked) {
+      return `
+        <span class="apt-chip locked" title="locked">
+          ${escapeHtml(name)}
+          <span class="apt-lock" title="locked">${LOCK_SVG}</span>
+        </span>
+      `;
+    }
+
+    return `
+      <span class="apt-chip removable" data-apt-remove="${name}"
+            title="Click to remove">
+        ${escapeHtml(name)}
+      </span>
+    `;
+  }).join("");
 }
 
 function renderPreview(model) {
@@ -435,6 +619,8 @@ window.addEventListener("message", (event) => {
       selectedCuda = "";
       selectedTorch = "";
       baseImageOverride = "";
+      aptPackages = [];
+      aptWarn = "";
       renderEnvCustomizer();
     } catch (e) {
       console.error("Failed to parse preset.data", e);
